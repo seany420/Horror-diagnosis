@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Background circle for visibility on light/dark tabs -->
+  <circle cx="32" cy="32" r="30" fill="#0a0a0a" stroke="#c4a060" stroke-width="1"/>
+  <!-- Skull silhouette -->
+  <path d="M 32 12 C 22 12, 16 20, 16 30 C 16 38, 21 42, 22 44 L 22 50 C 22 53, 25 55, 28 55 L 28 58 L 30 56 L 32 58 L 34 56 L 36 58 L 36 55 C 39 55, 42 53, 42 50 L 42 44 C 43 42, 48 38, 48 30 C 48 20, 42 12, 32 12 Z" fill="#8b1a1a"/>
+  <!-- Eye sockets (hollow black) -->
+  <ellipse cx="25" cy="28" rx="4" ry="6" fill="#0a0a0a"/>
+  <ellipse cx="39" cy="28" rx="4" ry="6" fill="#0a0a0a"/>
+  <!-- Inner eye glow -->
+  <circle cx="25" cy="29" r="1" fill="#c4a060"/>
+  <circle cx="39" cy="29" r="1" fill="#c4a060"/>
+  <!-- Nasal cavity -->
+  <path d="M 30 36 L 32 42 L 34 36 Z" fill="#0a0a0a"/>
+  <!-- Teeth grin -->
+  <rect x="26" y="46" width="12" height="3" fill="#0a0a0a"/>
+  <line x1="29" y1="46" x2="29" y2="49" stroke="#8b1a1a" stroke-width="0.8"/>
+  <line x1="32" y1="46" x2="32" y2="49" stroke="#8b1a1a" stroke-width="0.8"/>
+  <line x1="35" y1="46" x2="35" y2="49" stroke="#8b1a1a" stroke-width="0.8"/>
+  <!-- Blood drip on left -->
+  <path d="M 22 42 L 22 48 L 21 49 L 22 50 L 23 49 L 22 48 Z" fill="#a82828"/>
+</svg>

@@ -760,16 +760,22 @@ const CHAR_TRAITS = {
    ============================================================ */
 
 function score_FunResponses(responses) {
-  // Sum trait weights from each answered scenario into a 15-axis vector.
-  // Then normalize: divide by max possible to get -100..+100 per axis.
+  // Sum trait weights from each answered scenario into a 15-axis vector,
+  // then normalize to fill -100..+100 range more aggressively.
+  //
+  // Why this needs to be aggressive: the previous implementation divided by
+  // theoreticalMax = (items_touching_axis * 3), which assumed users pick
+  // the most-extreme-on-that-axis option on every relevant item. In practice
+  // users hit 30-40% of that max even with consistent choices, compressing
+  // everyone toward the origin. We fix this by dividing by a more realistic
+  // max (typical-best weight per item, ~2 instead of 3), so the resulting
+  // user vector actually fills the trait space.
+
   const userTraits = {};
   TRAIT_AXES.forEach(a => { userTraits[a.id] = 0; });
-  const maxPossible = {};
-  TRAIT_AXES.forEach(a => { maxPossible[a.id] = 0; });
 
   FUN_SCENARIOS.forEach(scenario => {
     const answer = responses[scenario.id];
-    // Track maximum-magnitude weight available per axis from this item, for normalization
     if (!answer) return;
     const chosenOption = scenario.options.find(o => o.id === answer);
     if (!chosenOption || !chosenOption.weights) return;
@@ -777,20 +783,9 @@ function score_FunResponses(responses) {
       if (userTraits[axisId] === undefined) return;
       userTraits[axisId] += w;
     });
-    // Track maximums for normalization
-    scenario.options.forEach(opt => {
-      if (!opt.weights) return;
-      Object.entries(opt.weights).forEach(([axisId, w]) => {
-        if (maxPossible[axisId] === undefined) return;
-        maxPossible[axisId] = Math.max(maxPossible[axisId], Math.abs(w));
-      });
-    });
   });
 
-  // Normalize per axis: scale to -100..+100 based on count of items contributing
-  const normalized = {};
-  // Simple approach: each axis sum can range roughly (count * 3) to (count * -3).
-  // Count items that touch each axis
+  // Count items touching each axis for per-axis normalization
   const itemCount = {};
   TRAIT_AXES.forEach(a => { itemCount[a.id] = 0; });
   FUN_SCENARIOS.forEach(scenario => {
@@ -802,12 +797,15 @@ function score_FunResponses(responses) {
     axesTouched.forEach(k => { if (itemCount[k] !== undefined) itemCount[k] += 1; });
   });
 
+  // Normalize: use empirical "realistic max" of ~1.5 weight per touching item
+  // (most options contribute 1-2, occasionally 3). This makes users actually
+  // fill the trait space rather than clustering near zero.
+  const normalized = {};
   TRAIT_AXES.forEach(a => {
     const count = itemCount[a.id] || 1;
-    // theoretical max is count * 3
-    const theoreticalMax = count * 3;
+    const realisticMax = count * 1.5;
     const raw = userTraits[a.id];
-    normalized[a.id] = Math.round((raw / theoreticalMax) * 100);
+    normalized[a.id] = Math.round((raw / realisticMax) * 100);
     if (normalized[a.id] > 100) normalized[a.id] = 100;
     if (normalized[a.id] < -100) normalized[a.id] = -100;
   });
@@ -816,27 +814,67 @@ function score_FunResponses(responses) {
 }
 
 function matchFunCharacters(userTraits, characters) {
-  // Euclidean distance in 15-dim trait space, lower is better match.
-  // Then convert to a similarity percentage (0-100).
+  // CENTERED cosine similarity: subtract the population mean from each axis
+  // before computing alignment. This is the key fix for personality matching —
+  // without centering, characters with broadly-positive trait profiles (like
+  // "warm caregiver" types) correlate positively with almost any user, and
+  // distinctive characters (the predator, the void-speaker) almost never match.
+  // After centering, what matters is the SHAPE of the trait profile relative
+  // to average — vigilance noticeably ABOVE the norm vs vigilance noticeably
+  // BELOW. This is how Big Five and similar instruments actually score.
+
   const userVec = userTraits.normalized;
   const results = [];
+
+  // Compute population mean for each axis across all characters
+  const popMean = {};
+  TRAIT_AXES.forEach(a => {
+    let sum = 0, count = 0;
+    Object.values(CHAR_TRAITS).forEach(traits => {
+      if (traits[a.id] !== undefined) {
+        sum += traits[a.id];
+        count += 1;
+      }
+    });
+    popMean[a.id] = count > 0 ? sum / count : 0;
+  });
+
+  // Center user vector and precompute its magnitude
+  const userCentered = {};
+  let userMagSq = 0;
+  TRAIT_AXES.forEach(a => {
+    const v = (userVec[a.id] ?? 0) - popMean[a.id];
+    userCentered[a.id] = v;
+    userMagSq += v * v;
+  });
+  const userMag = Math.sqrt(userMagSq) || 1;
 
   characters.forEach(ch => {
     const traits = CHAR_TRAITS[ch.id];
     if (!traits) return;
-    // Sum squared distances across all 15 axes
-    let sumSq = 0;
-    let axesUsed = 0;
+
+    // Center the character vector
+    let dot = 0;
+    let charMagSq = 0;
     TRAIT_AXES.forEach(a => {
-      const userVal = userVec[a.id] ?? 0;
-      const charVal = traits[a.id] ?? 0;
-      const diff = userVal - charVal;
-      sumSq += diff * diff;
-      axesUsed += 1;
+      const u = userCentered[a.id];
+      const c = (traits[a.id] ?? 0) - popMean[a.id];
+      dot += u * c;
+      charMagSq += c * c;
     });
-    const dist = Math.sqrt(sumSq / axesUsed); // RMS distance per axis
-    // Theoretical max distance is 200 (one is +100, other is -100). Convert to similarity.
-    const similarity = Math.max(0, Math.min(100, Math.round(100 - (dist / 2))));
+    const charMag = Math.sqrt(charMagSq) || 1;
+    const cosine = dot / (userMag * charMag); // -1 to +1
+
+    // Convert cosine to 0-100 percentage. Map [-1, +1] → [0, 100].
+    let similarity = ((cosine + 1) / 2) * 100;
+
+    // Light magnitude-imbalance penalty (using centered magnitudes):
+    // someone who's near the population average shouldn't claim 95% match with
+    // an extreme character.
+    const magRatio = Math.min(userMag, charMag) / Math.max(userMag, charMag);
+    similarity = similarity * 0.75 + magRatio * 100 * 0.25;
+
+    similarity = Math.max(0, Math.min(100, Math.round(similarity)));
 
     results.push({
       id: ch.id,
@@ -847,7 +885,7 @@ function matchFunCharacters(userTraits, characters) {
       therapeuticUse: ch.therapeuticUse,
       inspiredBy: ch.inspiredBy,
       traits,
-      distance: dist,
+      cosine: cosine,
       pct: similarity
     });
   });

@@ -814,67 +814,107 @@ function score_FunResponses(responses) {
 }
 
 function matchFunCharacters(userTraits, characters) {
-  // CENTERED cosine similarity: subtract the population mean from each axis
-  // before computing alignment. This is the key fix for personality matching —
-  // without centering, characters with broadly-positive trait profiles (like
-  // "warm caregiver" types) correlate positively with almost any user, and
-  // distinctive characters (the predator, the void-speaker) almost never match.
-  // After centering, what matters is the SHAPE of the trait profile relative
-  // to average — vigilance noticeably ABOVE the norm vs vigilance noticeably
-  // BELOW. This is how Big Five and similar instruments actually score.
+  // SIGNAL-WEIGHTED similarity with DISTINCTIVENESS bonus:
+  //
+  // The core problem with naive trait-matching is that characters with
+  // moderate, broad-coverage trait profiles (vigilance=40, restraint=50,
+  // compassion=50, order=50, etc. — call them "universal also-rans") sit
+  // at low Euclidean distance from any user vector. They keep winning even
+  // though their match is generic, not personal.
+  //
+  // The fix: weight matches by how DISTINCTIVE the character is. A character
+  // whose trait profile differs sharply from the average horror archetype
+  // (high variance across axes, extreme values) gets a multiplier reward
+  // when they ALSO align with the user. A moderate-profile character gets
+  // a multiplier penalty, capping their max possible match percentage.
 
   const userVec = userTraits.normalized;
   const results = [];
 
-  // Compute population mean for each axis across all characters
+  // Compute population mean for each axis (used only to score character
+  // distinctiveness, NOT to center user-character distances).
   const popMean = {};
   TRAIT_AXES.forEach(a => {
     let sum = 0, count = 0;
     Object.values(CHAR_TRAITS).forEach(traits => {
-      if (traits[a.id] !== undefined) {
-        sum += traits[a.id];
-        count += 1;
-      }
+      if (traits[a.id] !== undefined) { sum += traits[a.id]; count += 1; }
     });
     popMean[a.id] = count > 0 ? sum / count : 0;
   });
 
-  // Center user vector and precompute its magnitude
-  const userCentered = {};
-  let userMagSq = 0;
-  TRAIT_AXES.forEach(a => {
-    const v = (userVec[a.id] ?? 0) - popMean[a.id];
-    userCentered[a.id] = v;
-    userMagSq += v * v;
+  // Precompute each character's distinctiveness score (RMS of deviation
+  // from population mean across all axes). Characters far from average
+  // are highly distinctive; characters near average are generic.
+  const distinctiveness = {};
+  Object.entries(CHAR_TRAITS).forEach(([id, traits]) => {
+    let sumSq = 0;
+    TRAIT_AXES.forEach(a => {
+      const dev = (traits[a.id] ?? 0) - popMean[a.id];
+      sumSq += dev * dev;
+    });
+    distinctiveness[id] = Math.sqrt(sumSq / TRAIT_AXES.length);
   });
-  const userMag = Math.sqrt(userMagSq) || 1;
+
+  // Find min/max distinctiveness for normalization
+  const distVals = Object.values(distinctiveness);
+  const minDist = Math.min(...distVals);
+  const maxDist = Math.max(...distVals);
+  const distRange = maxDist - minDist || 1;
+
+  // Signal weights: user's strongest axes count more
+  const weights = {};
+  let totalWeight = 0;
+  TRAIT_AXES.forEach(a => {
+    const u = userVec[a.id] ?? 0;
+    const w = 0.3 + Math.min(1.2, Math.abs(u) / 50);
+    weights[a.id] = w;
+    totalWeight += w;
+  });
 
   characters.forEach(ch => {
     const traits = CHAR_TRAITS[ch.id];
     if (!traits) return;
 
-    // Center the character vector
-    let dot = 0;
-    let charMagSq = 0;
+    // Weighted Euclidean distance
+    let weightedSumSq = 0;
     TRAIT_AXES.forEach(a => {
-      const u = userCentered[a.id];
-      const c = (traits[a.id] ?? 0) - popMean[a.id];
-      dot += u * c;
-      charMagSq += c * c;
+      const u = userVec[a.id] ?? 0;
+      const c = traits[a.id] ?? 0;
+      const diff = u - c;
+      weightedSumSq += (diff * diff) * weights[a.id];
     });
-    const charMag = Math.sqrt(charMagSq) || 1;
-    const cosine = dot / (userMag * charMag); // -1 to +1
+    const dist = Math.sqrt(weightedSumSq / totalWeight);
 
-    // Convert cosine to 0-100 percentage. Map [-1, +1] → [0, 100].
-    let similarity = ((cosine + 1) / 2) * 100;
+    // Base similarity from distance
+    let similarity = 100 - (dist / 2);
 
-    // Light magnitude-imbalance penalty (using centered magnitudes):
-    // someone who's near the population average shouldn't claim 95% match with
-    // an extreme character.
-    const magRatio = Math.min(userMag, charMag) / Math.max(userMag, charMag);
-    similarity = similarity * 0.75 + magRatio * 100 * 0.25;
+    // Direction-agreement on user's top-5 strongest axes (small bonus/penalty)
+    const topUserAxes = TRAIT_AXES
+      .map(a => ({ id: a.id, abs: Math.abs(userVec[a.id] ?? 0) }))
+      .sort((a, b) => b.abs - a.abs)
+      .slice(0, 5)
+      .map(x => x.id);
+    let directionAdj = 0;
+    topUserAxes.forEach(axisId => {
+      const u = userVec[axisId] ?? 0;
+      const c = traits[axisId] ?? 0;
+      if (Math.abs(u) < 20) return;
+      if (Math.sign(u) === Math.sign(c) && Math.abs(c) > 20) directionAdj += 2;
+      else if (Math.sign(u) !== Math.sign(c) && Math.abs(c) > 20) directionAdj -= 2.5;
+    });
+    similarity += directionAdj;
 
-    similarity = Math.max(0, Math.min(100, Math.round(similarity)));
+    // DISTINCTIVENESS multiplier — discourages generic "universal also-ran"
+    // characters from winning matches by default. Without this, characters
+    // with moderate broad-coverage trait profiles dominate even when the
+    // user's pattern doesn't actually point at them. With it, characters
+    // need to be both distinctive AND aligned to win.
+    const distNorm = (distinctiveness[ch.id] - minDist) / distRange;
+    // Cap factor: generic characters max out at ~84%, distinctive at ~98%
+    const capFactor = 0.84 + 0.14 * distNorm;
+    similarity = Math.min(similarity, 100 * capFactor);
+
+    similarity = Math.max(0, Math.min(99, Math.round(similarity)));
 
     results.push({
       id: ch.id,
@@ -885,7 +925,7 @@ function matchFunCharacters(userTraits, characters) {
       therapeuticUse: ch.therapeuticUse,
       inspiredBy: ch.inspiredBy,
       traits,
-      cosine: cosine,
+      distance: dist,
       pct: similarity
     });
   });
